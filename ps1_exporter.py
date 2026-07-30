@@ -225,7 +225,7 @@ class ExportPS1(Operator, ExportHelper):
     bl_idname = "export_scene.ps1"
     bl_label = "Export PS1"
     
-    filename_ext = ""
+    filename_ext = ".h"
     
     filter_glob: StringProperty(
         default="*.h;*.hh",
@@ -768,6 +768,8 @@ typedef struct {
         # Update vector dimensions when using psyqo-style
         if(self.vector_type == 'PSYQO_VEC3'):
             vector_type = "psyqo::Vec4"
+        elif (self.vector_type == 'SVECTOR'):
+            vector_type = "CVECTOR"
 
         # Always export vertex_colors array (even if empty) so code compiles
         content += f"// Vertex Colors\n"
