@@ -193,17 +193,54 @@ def detect_material_properties(mesh, poly, enable_unlit, enable_specular, enable
     
     return result
 
+def update_file_format(self, context):
+    """Update the file extension and filter based on selected file format"""
+    """Reference: https://github.com/KhronosGroup/glTF-Blender-IO/blob/main/addons/io_scene_gltf2/__init__.py#L101"""
+
+    ext = '.h' if self.file_format == 'C' else '.hh'
+
+    old_filepath = self.filepath
+
+    if self.filepath:
+        base, _ = os.path.splitext(self.filepath)
+        self.filepath = base + ext
+
+    space = context.space_data
+    if not isinstance(space, bpy.types.SpaceFileBrowser):
+        return
+    if not space.active_operator:
+        return
+    if space.active_operator.bl_idname != "EXPORT_SCENE_OT_ps1":
+        return
+
+    space.params.filename = os.path.splitext(space.params.filename)[0] + ext
+    space.params.filter_glob = f"*{ext}"
+
+    bpy.ops.file.refresh()
+
+    return old_filepath != self.filepath
+
 class ExportPS1(Operator, ExportHelper):
     """Export to PlayStation 1 C header format"""
     bl_idname = "export_scene.ps1"
     bl_label = "Export PS1"
     
-    filename_ext = ".h"
+    filename_ext = ""
     
     filter_glob: StringProperty(
-        default="*.h",
+        default="*.h;*.hh",
         options={'HIDDEN'},
-        maxlen=255,
+    )
+
+    file_format: EnumProperty(
+        name="File Format",
+        description="Choose the file format for export",
+        items=[
+            ('C', "C Header (.h)", "Export as C header file"),
+            ('CPP', "C++ Header (.hh)", "Export as C++ header file"),
+        ],
+        default='C',
+        update=update_file_format
     )
     
     convert_coords: BoolProperty(
@@ -257,9 +294,25 @@ class ExportPS1(Operator, ExportHelper):
         ],
         default='PSYQ'
     )
+
+    vector_type: EnumProperty(
+        name="Vector Type",
+        description="Choose the vector type for vertices and normals",
+        items=[
+            ('SVECTOR', "SVECTOR", "Use SVECTOR struct (int16_t) for vertices and normals"),
+            ('PSYQO_VEC3', "psyqo::Vec3", "Use psyqo::Vec3 struct for vertices and normals")
+        ],
+        default='SVECTOR'
+    )
     
     def draw(self, context):
         layout = self.layout
+        layout.label(text="File Format:")
+        layout.prop(self, "file_format", text="")
+        layout.label(text="Header Type:")
+        layout.prop(self, "header_type", text="")
+        layout.label(text="Vector Type:")
+        layout.prop(self, "vector_type", text="")
         layout.label(text="Export options:")
         layout.prop(self, "convert_coords")
         layout.prop(self, "enable_unlit")
@@ -268,8 +321,10 @@ class ExportPS1(Operator, ExportHelper):
         layout.prop(self, "enable_specular")
         layout.prop(self, "enable_metallic")
         layout.prop(self, "export_animations")
-        layout.label(text="Header Type:")
-        layout.prop(self, "header_type", text="")
+
+    def check(self, context):
+        """Check that the file extensions matches format"""
+        return update_file_format(self, context)
     
     def execute(self, context):
         return self.export_ps1(context)
@@ -502,18 +557,29 @@ class ExportPS1(Operator, ExportHelper):
         
         # Choose includes and type definitions based on header type
         if self.header_type == 'PSYQO':
-            includes = """#include <stdint.h>
-
+            includes = """#include <stdint.h>"""
+            
+            if self.vector_type == 'SVECTOR':
+                includes += """
 #ifndef SVECTOR_DEFINED
 #define SVECTOR_DEFINED
 typedef struct {
     int16_t vx, vy, vz;
 } SVECTOR;
 #endif"""
+    
+            else:
+                includes += """
+#include <psyqo/vector.hh>"""
         else:  # PSYQ
             includes = """#include <sys/types.h>
 #include <libgte.h>"""
+            if self.vector_type == 'PSYQO_VEC3':
+                includes += """
+#include <psyqo/vector.hh>"""
         
+        vector_type = "SVECTOR" if self.vector_type == 'SVECTOR' else "psyqo::Vec3"
+
         tri_count = sum(1 for f in faces if f['is_tri'])
         quad_count = len(faces) - tri_count
         
@@ -535,7 +601,7 @@ typedef struct {
 #define {prefix_upper}_PS1_SCALE {PS1_SCALE_FACTOR}
 
 // Vertices (fixed-point, scaled by {PS1_SCALE_FACTOR})
-SVECTOR {prefix}_vertices[{prefix_upper}_VERTICES_COUNT] = {{
+{vector_type} {prefix}_vertices[{prefix_upper}_VERTICES_COUNT] = {{
 """
         
         for v in vertices:
@@ -545,7 +611,7 @@ SVECTOR {prefix}_vertices[{prefix_upper}_VERTICES_COUNT] = {{
         
         # Normals (normalized, scaled by 4096 = ONE)
         content += f"// Normals (for lighting calculations)\n"
-        content += f"SVECTOR {prefix}_normals[{prefix_upper}_VERTICES_COUNT] = {{\n"
+        content += f"{vector_type} {prefix}_normals[{prefix_upper}_VERTICES_COUNT] = {{\n"
         
         for n in normals:
             content += f"    {{ {n['x']}, {n['y']}, {n['z']} }},\n"
@@ -566,7 +632,7 @@ SVECTOR {prefix}_vertices[{prefix_upper}_VERTICES_COUNT] = {{
         # UVs
         if uvs:
             content += f"// UV Coordinates\n"
-            content += f"SVECTOR {prefix}_uvs[{prefix_upper}_UVS_COUNT] = {{\n"
+            content += f"{vector_type} {prefix}_uvs[{prefix_upper}_UVS_COUNT] = {{\n"
             for uv in uvs:
                 content += f"    {{ {uv['u']}, {uv['v']}, 0 }},\n"
             content += "};\n\n"
@@ -699,18 +765,22 @@ SVECTOR {prefix}_vertices[{prefix_upper}_VERTICES_COUNT] = {{
                 content += f"    {mesh_id},  // {mesh_name}\n"
         content += "};\n\n"
         
+        # Update vector dimensions when using psyqo-style
+        if(self.vector_type == 'PSYQO_VEC3'):
+            vector_type = "psyqo::Vec4"
+
         # Always export vertex_colors array (even if empty) so code compiles
         content += f"// Vertex Colors\n"
         if has_vertex_colors and vertex_colors:
             content += f"#define {prefix_upper}_VERTEX_COLORS_COUNT {len(vertex_colors)}\n"
-            content += f"CVECTOR {prefix}_vertex_colors[{prefix_upper}_VERTEX_COLORS_COUNT] = {{\n"
+            content += f"{vector_type} {prefix}_vertex_colors[{prefix_upper}_VERTEX_COLORS_COUNT] = {{\n"
             for vc in vertex_colors:
                 content += f"    {{ {vc['r']}, {vc['g']}, {vc['b']}, 0 }},\n"
             content += "};\n\n"
         else:
             # Export empty array for models without vertex colors
             content += f"#define {prefix_upper}_VERTEX_COLORS_COUNT 1\n"
-            content += f"CVECTOR {prefix}_vertex_colors[{prefix_upper}_VERTEX_COLORS_COUNT] = {{\n"
+            content += f"{vector_type} {prefix}_vertex_colors[{prefix_upper}_VERTEX_COLORS_COUNT] = {{\n"
             content += "    { 128, 128, 128, 0 }  // Default gray\n"
             content += "};\n\n"
         
@@ -811,19 +881,31 @@ SVECTOR {prefix}_vertices[{prefix_upper}_VERTICES_COUNT] = {{
             
             animation_data.append(frame_vertices)
         
-        # Choose includes and type definitions based on header type
+       # Choose includes and type definitions based on header type
         if self.header_type == 'PSYQO':
-            includes = """#include <stdint.h>
-
+            includes = """#include <stdint.h>"""
+            
+            if self.vector_type == 'SVECTOR':
+                includes += """
 #ifndef SVECTOR_DEFINED
 #define SVECTOR_DEFINED
 typedef struct {
     int16_t vx, vy, vz;
 } SVECTOR;
 #endif"""
+    
+            else:
+                includes += """
+#include <psyqo/vector.hh>"""
         else:  # PSYQ
             includes = """#include <sys/types.h>
 #include <libgte.h>"""
+            if self.vector_type == 'PSYQO_VEC3':
+                includes += """
+#include <psyqo/vector.hh>"""
+        
+        vector_type = "SVECTOR" if self.vector_type == 'SVECTOR' else "psyqo::Vec3"
+
         
         content = f"""// PlayStation 1 Animation Export
 // Model: {base_name}
@@ -838,7 +920,7 @@ typedef struct {
 #define {action_name.upper()}_FRAMES_COUNT {frame_count}
 #define {action_name.upper()}_VERTICES_COUNT {len(animation_data[0]) if animation_data else 0}
 
-SVECTOR {action_name}_anim[{action_name.upper()}_FRAMES_COUNT][{action_name.upper()}_VERTICES_COUNT] = {{
+{vector_type} {action_name}_anim[{action_name.upper()}_FRAMES_COUNT][{action_name.upper()}_VERTICES_COUNT] = {{
 """
         
         for frame_idx, frame_verts in enumerate(animation_data):
@@ -853,7 +935,7 @@ SVECTOR {action_name}_anim[{action_name.upper()}_FRAMES_COUNT][{action_name.uppe
             f.write(content)
 
 def menu_func_export(self, context):
-    self.layout.operator(ExportPS1.bl_idname, text="PlayStation 1 (.h)")
+    self.layout.operator(ExportPS1.bl_idname, text="PlayStation 1 (.hh/.h)")
 
 def register():
     bpy.utils.register_class(ExportPS1)
